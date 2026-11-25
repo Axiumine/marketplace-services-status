@@ -1,3 +1,5 @@
+import { availableParallelism } from 'node:os'
+
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
 export default {
   testRunner: 'vitest',
@@ -9,7 +11,9 @@ export default {
   // 28 workers on a 32-thread box, the same number every other package on the platform
   // carries. See the long note in any backend service's config for why it is uniform and
   // why "it still scored 100" is not evidence that a concurrency change was harmless.
-  concurrency: 28,
+  // On CI, one worker per core: a GitHub-hosted runner has 4 vCPU, 28 workers starve it, and a
+  // starved worker is counted as a kill.
+  concurrency: process.env.CI ? availableParallelism() : 28,
   timeoutMS: 60000,
   // Mutation score is a gate, not a report. `break` fails the run below this score.
   // Never lower it to make a run pass — add the missing test, or delete the branch
