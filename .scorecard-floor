@@ -1,0 +1,35 @@
+# OpenSSF Scorecard floor for this repository. See ADR-054.
+#
+# Read by .githooks/pre-push. Every value is what this repository actually scored
+# when the gate landed, so the gate can only ever ratchet upwards.
+#
+# Raise a number here when a check genuinely improved and you want the new value
+# defended from now on. Never lower one: a check that fell is a control that broke,
+# and the fix is the control. -1 means the check did not apply to this repository.
+#
+# aggregate is scorecard's own weighted score over the checks that scored >= 0.
+#
+# Measured on 2026-11-25, when `main` held only the history extracted from the parent
+# (ADR-060): no workflow, no SECURITY.md and no Dependabot config on the default
+# branch yet. Raise those checks once a branch carrying them is merged into `main`.
+
+aggregate=3.8
+
+Binary-Artifacts=10
+Branch-Protection=3
+CI-Tests=-1
+CII-Best-Practices=0
+Code-Review=0
+Contributors=3
+Dangerous-Workflow=-1
+Dependency-Update-Tool=0
+Fuzzing=10
+License=10
+Maintained=0
+Packaging=-1
+Pinned-Dependencies=-1
+SAST=0
+Security-Policy=0
+Signed-Releases=-1
+Token-Permissions=-1
+Vulnerabilities=10

@@ -79,9 +79,8 @@ ALLOWED_HOSTS=
 
 # ── Quality gates ──────────────────────────────────────────────────────────────
 
-# Qodana Cloud token, read by qodana.sh and required by both of the parent
-# workspace's git hooks — this app has no repo of its own, so its gates live in
-# ../.githooks/. Qodana 2023.2+ refuses to start without a token, so an empty
+# Qodana Cloud token, read by qodana.sh and required by both git hooks in
+# .githooks/. Qodana 2023.2+ refuses to start without a token, so an empty
 # value here means the scan step blocks rather than being skipped.
 #
 # Per project: create a `marketplace-services-status` project of its own on qodana.cloud.

@@ -2,7 +2,7 @@
  * The generators and the run budget the three `*.property.test.ts` suites share.
  *
  * Indentation: this file and the three suites are two spaces, like every other file of this package. The package
- * carries no eslint or prettier (ADR-025), so nothing enforces it: a file you add here follows it by hand.
+ * carries no eslint or prettier (ADR-060), so nothing enforces it: a file you add here follows it by hand.
  */
 import fc from 'fast-check';
 

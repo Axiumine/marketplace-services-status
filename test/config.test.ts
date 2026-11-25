@@ -17,7 +17,8 @@ import { loadConfig } from '../src/config';
 // the repo and differs per machine — the BIND_ALL guard in particular flips on it.
 // ---------------------------------------------------------------------------
 
-const { files, readFailure } = vi.hoisted(() => ({
+const { files, readFailure, dotenvConfig } = vi.hoisted(() => ({
+  dotenvConfig: vi.fn(() => ({ parsed: {} })),
   files: new Map<string, string>(),
   // What readFileSync should throw instead of answering, when a test needs the failure itself to
   // be the subject rather than the content.
@@ -40,7 +41,7 @@ vi.mock('fs', () => ({
   }
 }));
 
-vi.mock('dotenv', () => ({ config: () => ({ parsed: {} }) }));
+vi.mock('dotenv', () => ({ config: dotenvConfig }));
 
 // __dirname inside src/config.ts, and the two candidates it derives from it. Written the same way
 // the source does rather than hard-coded, so a moved file fails these tests instead of silently
@@ -128,6 +129,18 @@ afterEach(() => {
     if (saved[key] === undefined) delete process.env[key];
     else process.env[key] = saved[key];
   }
+});
+
+describe('loadConfig: the dotenv file', () => {
+  // Every variable has a default, so a dropped load fails nothing: the file is just never read.
+  it('loads it before it reads the environment', () => {
+    dotenvConfig.mockImplementationOnce(() => {
+      process.env.PORT = '4999';
+      return { parsed: {} };
+    });
+
+    expect(loadConfig().port).toBe(4999);
+  });
 });
 
 describe('loadConfig: finding services.json', () => {

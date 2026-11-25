@@ -576,6 +576,17 @@ describe('the page', () => {
     }
   });
 
+  // The route is '/' and the router tolerates one trailing slash on it, so '//' is the root too.
+  // Asked with OPTIONS because a GET for '//' is refused by the static middleware before it routes.
+  it('treats the root written with a trailing slash as the root', async () => {
+    const { port } = await startServer();
+
+    const res = await request(port, 'OPTIONS', '//');
+
+    expect(res.status).toBe(200);
+    expect(res.headers.allow).toBe('HEAD, GET');
+  });
+
   // The shell is served at exactly one path. A matcher that answered more would put the topology
   // — and the action buttons — under every URL the static middleware does not claim.
   it('404s a path the page does not own', async () => {
@@ -1549,6 +1560,8 @@ describe('main', () => {
     const address = running.parts.httpServer.address();
     const port = typeof address === 'object' && address ? address.port : 0;
     expect(port).toBeGreaterThan(0);
+    // The banner is the only line that says where a booted monitor can be reached.
+    expect(log).toHaveBeenCalledWith('marketplace-services-status monitor listening');
     expect((await get(port, '/api/services')).status).toBe(200);
     // ⚠️ One refresh before the listener is armed: the first client must not be handed an empty
     // states array and have to wait a whole poll interval for the real one.

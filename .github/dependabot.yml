@@ -1,0 +1,53 @@
+# Dependabot — what raises Scorecard's Dependency-Update-Tool check, and nothing more.
+#
+# ⚠️ READ THIS BEFORE MERGING ANY DEPENDABOT PULL REQUEST — GREEN IS NOT ENOUGH.
+# .github/workflows/gates.yml runs semgrep, trivy, typecheck, the test suite with
+# coverage and mutation on the pull request, and `main` requires its `gates` check
+# (ADR-055). Two gates do not run there: Qodana needs a JetBrains Cloud token kept
+# out of CI, and the Scorecard floor has its own workflow and grades the
+# repository's state on GitHub rather than a diff.
+#
+# The procedure is therefore still not optional: fetch the branch, check it out,
+# `yarn install`, and let pre-commit and pre-push run for real. Merge only after they
+# pass. The hooks are the authoritative layer; the green check is the second one.
+#
+# ⚠️ YAML forbids tabs — see the note in .github/workflows/scorecard.yml.
+version: 2
+updates:
+  - package-ecosystem: 'npm'
+    directories: ['/', '/.github/tools']
+    schedule:
+      interval: 'weekly'
+      day: 'saturday'
+      time: '03:00'
+      timezone: 'Etc/UTC'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore'
+      include: 'scope'
+    labels:
+      - 'dependencies'
+    groups:
+      # One grouped PR for the toolchain: one local verification run.
+      dev-toolchain:
+        dependency-type: 'development'
+        update-types:
+          - 'minor'
+          - 'patch'
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'saturday'
+      time: '03:30'
+      timezone: 'Etc/UTC'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'ci'
+      include: 'scope'
+    labels:
+      - 'dependencies'
+    groups:
+      actions:
+        patterns:
+          - '*'

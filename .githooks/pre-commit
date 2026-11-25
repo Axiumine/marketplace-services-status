@@ -1,0 +1,580 @@
+#!/usr/bin/env bash
+# pre-commit — refuse to commit secret files or live secret values.
+#
+# Installed as a per-repo copy (not a symlink: nothing else can move out from
+# under it). Three independent checks — check 0 reads the working tree,
+# checks 1-2 the staged index:
+#   0. a working-tree env line the parsers here disagree on -> block
+#   1. staged PATH looks like a secret file            -> block
+#   2. staged ADDED LINES contain a high-entropy secret -> block
+#
+# Patterns are deliberately narrow enough that the committed `env` / `npmrc`
+# placeholder templates pass, and a line that is a self-declared placeholder
+# (`KEY=test-…`) is dropped before the value scan. Override a verified false
+# positive with:
+#   git commit --no-verify
+# Before any of them, one guard that is about the commit rather than its
+# content: `main` is not a branch to commit onto (BCON-06, R35).
+set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# The branch, before anything else. BCON-06, RISK_REGISTER R35.
+#
+# `main` is the checked-out branch in all seventeen repos by default, and every
+# rule on this platform says to branch before the first edit of any task.
+# Nothing downstream caught the mistake until this block existed: a commit that
+# lands on `main` passes every gate here, and untangling it afterwards is the
+# one operation a shallow history makes expensive.
+#
+# It cannot fire on an ordinary merge. Git runs this hook for `git commit`
+# only, so an automatic `--no-ff` merge commit never reaches it; the one merge
+# that does is a conflicted one finished by hand, and `MERGE_HEAD` exists at
+# exactly that moment. A detached HEAD — what `git submodule update` leaves
+# behind — has no symbolic ref, so it is not this check's business either.
+#
+# The escape hatch is named rather than `--no-verify`, which would drop the
+# secret guard below along with it. The first commit of a brand-new repo needs
+# it, `git init` having started on `main` with nowhere else to be:
+#   SKIP_MAIN_GUARD=1 git commit
+if [ "$(git symbolic-ref --short HEAD 2> /dev/null || true)" = 'main' ] &&
+	[ ! -f "$(git rev-parse --git-path MERGE_HEAD)" ] &&
+	[ -z "${SKIP_MAIN_GUARD:-}" ]; then
+	printf '\n  ✗ pre-commit: this commit would land on `main`.\n'
+	printf '    Branch first:               git switch -c <type>/<slug>\n'
+	printf '    Deliberate commit on main:  SKIP_MAIN_GUARD=1 git commit\n\n'
+	exit 1
+fi
+
+fail=0
+
+# ---------------------------------------------------------------------------
+# Check 0 — an env value broken across two physical lines.
+#
+# dotenv ends a value at the newline *even inside quotes*, hands back the
+# truncated prefix, and then parses the orphan tail — a bare fragment with no
+# `KEY=` on it — as its own variable named after its first token. Both halves
+# are silent: the service boots, its own suite stays green, and only a peer
+# service that must agree on the value ever notices. On 2026-08-09 all five
+# `.env` files holding `KEYGRIP_KEY_1`/`_2` were broken this way, 88-char keys
+# wrapped after 76, one file carrying the tail twice.
+#
+# Quoting does not prevent it — every one of those values was correctly quoted
+# — so the "quote anything with whitespace" convention (RISK_REGISTER R05) is
+# not enough and this runs as a gate instead. R05b.
+#
+# The second half of the check is R05 itself: a value left UNQUOTED. Measured
+# on this platform rather than assumed — `KEY=abc def` is `abc def` to dotenv
+# 17.4.2 and an `invalid line` to direnv 2.32.1, which then exports none of the
+# shared layer; `KEY=abc#tail` is `abc` to both, silently, because each reads
+# the `#` as the start of a comment. One file, two readers, two answers, and
+# the truncating one says nothing. A pair of quotes settles every case, so an
+# unquoted value holding whitespace or a `#` is blocked here instead of being
+# left to a convention that has now been broken twice.
+#
+# Measured again 2026-09-02, and the split half needed correcting too. dotenv
+# 17.4.2 does not truncate a wrap inside quotes: it keeps both physical lines
+# as one newline-bearing value, silently wrong rather than short. It truncates
+# an unquoted wrap at the newline, and the orphan tail becomes a variable only
+# when the tail carries an `=` - which base64 padding supplies. direnv 2.32.1
+# refuses a wrap of any kind, quoted or not, and exports nothing at all from
+# that file. So a tail like `kJ3xQ==` is a legal KEY=VALUE line to both readers
+# and used to pass here. Two rules close it, and neither costs a false positive
+# on the 706 keys that exist today: the key must be SCREAMING_SNAKE_CASE, and an
+# unquoted value may not open with the `=` that base64 padding leaves behind.
+#
+# It reads the working tree, not the index, because the file it most needs to
+# see is git-ignored and never staged. Line numbers and key names only: no
+# value is ever printed, per .claude/SECRETS.md.
+#
+# A deliberate multi-line value (a PEM body, say) would trip this. None exists
+# on this platform; if one is ever added, `git commit --no-verify`.
+# ---------------------------------------------------------------------------
+env_shape_ok() {
+	local f="$1" n=0 line trimmed val q bad=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		n=$((n + 1))
+		trimmed="${line#"${line%%[![:space:]]*}"}"
+		case "$trimmed" in '' | '#'*) continue ;; esac
+		if [[ ! $trimmed =~ ^[A-Z][A-Z0-9_]*= ]]; then
+			echo "pre-commit: $f:$n is not a SCREAMING_SNAKE KEY=VALUE line — the value above it is cut in two." >&2
+			bad=1
+			continue
+		fi
+		val="${trimmed#*=}"
+		# Trailing whitespace only: both readers drop it, so there is nothing to
+		# disagree about and flagging it would be a false positive on a stray space.
+		val="${val%"${val##*[![:space:]]}"}"
+		q="${val:0:1}"
+		if [ "$q" = '"' ] || [ "$q" = "'" ]; then
+			if [ "${#val}" -lt 2 ] || [ "${val: -1}" != "$q" ]; then
+				echo "pre-commit: $f:$n — ${trimmed%%=*} opens a $q quote that never closes on this line." >&2
+				bad=1
+			fi
+		elif [ -n "$val" ]; then
+			case "$val" in
+			'='*)
+				echo "pre-commit: $f:$n — ${trimmed%%=*} opens its value with =, which is what base64 padding leaves on the tail of a split value." >&2
+				bad=1
+				;;
+			*'#'*)
+				echo "pre-commit: $f:$n — ${trimmed%%=*} is unquoted and holds a #, which both readers cut the value at." >&2
+				bad=1
+				;;
+			*[[:space:]]*)
+				echo "pre-commit: $f:$n — ${trimmed%%=*} is unquoted and holds whitespace, which direnv refuses outright." >&2
+				bad=1
+				;;
+			esac
+		fi
+	done < "$f"
+	return "$bad"
+}
+
+env_shape_fail=0
+for envfile in .env .env.* env env.shared; do
+	[ -f "$envfile" ] || continue
+	env_shape_ok "$envfile" || env_shape_fail=1
+done
+if [ "$env_shape_fail" -ne 0 ]; then
+	echo 'pre-commit: aborted — an env line above is not read the same way by every reader on this platform. A' >&2
+	echo '            split value truncates and leaves a junk variable behind (R05b); an unquoted value holding' >&2
+	echo '            whitespace or a # is refused by direnv or cut short by dotenv (R05); a tail that reads as its' >&2
+	echo '            own KEY=VALUE line is still a tail (R05b). Rejoin it or quote it;' >&2
+	echo '            no value was printed here. Why a gate: docs/workflow.md §Environment files.' >&2
+	exit 1
+fi
+
+# ⚠️ Two of these are here because of RISK_REGISTER **R57**, and the first is a path rather than a
+# shape. `setup/mongodb.js` is `marketplace-db-setup`'s provisioning runbook: it holds a live database
+# credential by design and is kept out of git by one ignore line, so a deleted line or a `git add -f`
+# is the whole distance between that credential and an object database nobody can rewrite cheaply.
+# The `.key` extension came from `marketplace-nginx`'s copy of this hook, which carried it while the
+# other fifteen did not — a rule in one hook is a rule in one repo, which is the drift §8 of
+# `./scripts/audit-check.sh` now refuses for paths the way it already did for values. Neither costs
+# anything: of the 2845 tracked files in the sixteen repos, none matches either, measured.
+SECRET_PATH='(^|/)(\.env(\..*)?|\.envrc|\.npmrc|\.yarnrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|credentials\.json|service-account.*\.json)$|(^|/)setup/mongodb\.js$|\.(pem|key|p12|pfx|jks)$'
+# Anything under a `secrets/` directory, whatever it is called. `marketplace-docker-DBs/secrets/` holds
+# the replica-set keyfile, the CSFLE master key and now the generated Redis config, and the last of
+# those is a plain-text file with no extension and no telltale name. The directory is git-ignored, so
+# this rule only ever fires on a deliberate `git add -f` — which is exactly the case worth stopping.
+# Nothing in these seventeen repos tracks a path with that segment, so it can cost nothing else.
+SECRET_PATH+='|(^|/)secrets/'
+# Yarn 4's `.yarnrc.yml` is committed on purpose (nodeLinker and the like) and so is let through by
+# path above; its content is refused instead. It is also where a registry credential would go, so the
+# loop below reads the whole staged file for one of these keys, at any indent, quoted or not.
+YARNRC_CREDENTIAL='^[[:space:]]*["'"'"']?(npmAuthToken|npmAuthIdent|npmPassword|_auth|_authToken|_password)["'"'"']?[[:space:]]*:'
+
+# Vendored secret-scanner rulesets legitimately contain example secret patterns.
+SKIP_PATH='(^|/)(semgrep/vendor|gitleaks|trufflehog)/'
+
+# High-entropy formats only. A placeholder (npm_xxxx, all-x, ${VAR}, empty) must
+# never match, or the guard gets disabled by the first false positive.
+SECRET_VALUE='npm_[A-Za-z0-9]{36}'
+SECRET_VALUE+='|_authToken[[:space:]]*=[[:space:]]*["'"'"']?([0-9a-f]{8}-[0-9a-f]{4}-|ey[A-Za-z0-9_-]{10,}\.)'
+SECRET_VALUE+='|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+SECRET_VALUE+='|KEYGRIP_KEY_[12][[:space:]]*=[[:space:]]*"[^x"]{40}'
+# ADR-034's KEK, matched on its exact shape rather than on entropy: base64 of 32 bytes is 44 chars and
+# always ends in '='. No `env` template placeholder has that shape — they are x's with no padding, or
+# empty — so the rule cannot fire on one, and a real key cannot slip past by starting with an 'x' the
+# way the [^x] rules above allow.
+SECRET_VALUE+='|KEYGRIP_KEK[[:space:]]*=[[:space:]]*"?[A-Za-z0-9+/]{43}='
+# dotenv style: KEY=<16+ chars>, at line start (a leading + from the diff is stripped first)
+SECRET_VALUE+='|^[[:space:]]*(QODANA_TOKEN|SOCKETLABS_SERVER_APIKEY|SOCKETLABS_SERVER_ID|REDIS_PASSWORD|NPM_TOKEN)=[^$x[:space:]][^[:space:]]{15,}'
+# code style: KEY = "<16+ chars>" — a quoted literal, never process.env.KEY
+SECRET_VALUE+='|(QODANA_TOKEN|SOCKETLABS_SERVER_APIKEY|SOCKETLABS_SERVER_ID|REDIS_PASSWORD|NPM_TOKEN)[[:space:]]*[:=][[:space:]]*["'"'"'][^$x"'"'"'][^"'"'"']{15,}["'"'"']'
+SECRET_VALUE+='|mongodb(\+srv)?://[^:/[:space:]]+:[^@[:space:]]{10,}@'
+# A credential handed to a command line as a flag - `mongosh … -password <the value>`,
+# `mysql --password=…`. No rule above can see one: there is no `KEY=` at the start of the line, no
+# quoted assignment and no URI, which is exactly the shape RISK_REGISTER R14 was opened for. Three
+# things keep it from firing on prose: the flag has to open its own word, so `reset-password material`
+# in a comment is not a match; the value may not start with `$`, `x` or `<`, the three placeholder
+# shapes written in these repos; and it must run 12 characters or more. Costs 0 false positives
+# against every tracked file in all sixteen repos, measured before it landed.
+SECRET_VALUE+='|(^|[[:space:]])-{1,2}(password|passwd|pwd|pass)[[:space:]=]+["'"'"']?[^$x<"'"'"'[:space:]][^[:space:]"'"'"']{11,}'
+# redis.conf style: a `requirepass` or `masterauth` directive, which is how the Redis credential is
+# spelled since the password stopped riding in the container's argv. There is no KEY= to match on and
+# no fixed shape to the value, so the floor is the same 15 characters the dotenv rule uses, with the
+# same first-character-not-x placeholder escape.
+# Anchored at the line start: `requirepass` inside a sentence or a backticked word cannot trip it.
+SECRET_VALUE+='|^[[:space:]]*(requirepass|masterauth)[[:space:]]+[^$x[:space:]][^[:space:]]{14,}'
+# credential URL: `https://<userinfo>@host`, which is the shape of a Sentry/Bugsink DSN.
+# `DSN` cannot join the key list above — the committed `env` template assigns one there, so a
+# key-name rule would block the template itself. What separates the two is the userinfo: the
+# placeholder is 14 `x`, a real key is 32+ hex. Hence first-char-not-x plus a 20-char floor.
+SECRET_VALUE+='|https://[^$x:@/[:space:]"][^:@/[:space:]"]{19,}@'
+
+# Declared-placeholder lines, dropped before the value scan: a whole line whose *only*
+# content is `KEY=test-…` / `KEY: 'test-…'` (test fixtures in vitest.config.mts and friends).
+# Anchored at both ends on purpose — it can never whitelist a secret that merely appears
+# somewhere inside a URI, an object literal or a longer expression, only a line that is
+# itself a self-declared placeholder assignment.
+PLACEHOLDER='^[[:space:]]*[A-Za-z_][A-Za-z_0-9]*[[:space:]]*[:=][[:space:]]*'
+PLACEHOLDER+='["'"'"']?(test|dummy|fake|sample|example|placeholder|changeme|your[-_])[A-Za-z_0-9:/.-]*["'"'"']?,?[[:space:]]*$'
+
+# The `|| true` below absorbs grep's no-match exit 1 — it must not also absorb git's. A failed
+# `git diff` yields an empty list, and an empty list is exactly what "nothing staged" looks like:
+# the two loops would then scan nothing and the commit would pass by having read no files at all.
+# So git's status is taken on its own line, before grep can hide it.
+if ! all_staged="$(git diff --cached --name-only --diff-filter=ACMR)"; then
+	echo 'pre-commit: `git diff --cached` failed — refusing to commit rather than scan nothing.' >&2
+	exit 1
+fi
+staged=$(printf '%s\n' "$all_staged" | grep -Ev "$SKIP_PATH" || true)
+
+while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	if printf '%s\n' "$f" | grep -Eq "$SECRET_PATH"; then
+		echo "pre-commit: refusing to commit secret file: $f" >&2
+		fail=1
+	fi
+done <<< "$staged"
+
+# The staged blob, whole file: a credential on a line this commit did not touch is still in the commit.
+# Read into a variable and matched with a here-string, not piped into `grep -q` — the pipe would die of
+# SIGPIPE under `pipefail` and a failed `git show` would read as "no credential"; here it fails closed.
+while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	[ "${f##*/}" = '.yarnrc.yml' ] || continue
+	if ! yarnrc_blob="$(git show ":$f")"; then
+		echo "pre-commit: refusing $f: could not read the staged blob to check it for a registry credential." >&2
+		fail=1
+	elif grep -Eq "$YARNRC_CREDENTIAL" <<< "$yarnrc_blob"; then
+		echo "pre-commit: refusing $f: it carries a registry credential key (npmAuthToken, npmAuthIdent, npmPassword, _auth…). Those belong in ~/.yarnrc.yml, never in the repository." >&2
+		fail=1
+	fi
+done <<< "$staged"
+
+while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	# Added lines only, with the diff's leading '+' stripped so ^-anchors work.
+	if git diff --cached -U0 --diff-filter=ACMR -- "$f" | sed -n 's/^+//p' | grep -Eiv "$PLACEHOLDER" | grep -Eq "$SECRET_VALUE"; then
+		echo "pre-commit: $f adds what looks like a live secret value." >&2
+		fail=1
+	fi
+done <<< "$staged"
+
+if [ "$fail" -ne 0 ]; then
+	echo 'pre-commit: aborted. Secrets belong in .env (git-ignored); commit only the `env` placeholder template.' >&2
+	echo 'pre-commit: if this is genuinely a placeholder, re-run with: git commit --no-verify' >&2
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Backstop for a yarn.lock that resolves against a non-public registry.
+#
+# Same reasoning as the identical block in every sub-repo: a Yarn 1
+# lockfile records a `resolved` URL for every entry, so one resolved through a
+# mirror, a VPN-only cache or a rewritten uplink carries a registry that resolves
+# on one network only and breaks `yarn install` for every other clone.
+#
+# Under Yarn 4 it matches nothing, by construction: a Yarn 4 lockfile has no
+# `resolved` line (its `resolution: "pkg@npm:1.2.3"` carries no host), so there is
+# no registry URL for a mirror to leak into, however the install was routed. A
+# mirror belongs in the per-machine ~/.yarnrc.yml (npmRegistryServer) and never
+# in a repository. This check stays as the gate for a lockfile that is still, or
+# has gone back to, Yarn 1 format.
+#
+# Inspect the index (`:yarn.lock`), not the working
+# tree: the index is what a commit records. Checked unconditionally
+# rather than only when the lockfile is staged, and deliberately ABOVE the
+# path-scoping `exit 0` below: a tainted blob that happens to match HEAD produces
+# no staged diff, so a scoped check would wave through exactly the state this
+# exists to catch.
+#
+# Read into a variable instead of piping `git show` into `grep -q`: -q exits on
+# the first match, `git show` then dies of SIGPIPE, and `set -o pipefail` turns
+# that into a falsy pipeline — the check would silently never fire.
+# ---------------------------------------------------------------------------
+LOCK_INDEX="$(git show :yarn.lock 2> /dev/null || true)"
+
+# Match on "not the public registry" rather than one hard-coded mirror host, so
+# any mirror, VPN-only cache or rewritten uplink is caught too.
+#
+# Two hosts pass, not one: registry.npmjs.org is the public registry, and yarn
+# 1's own default is registry.yarnpkg.com — npm's CDN alias. Both resolve for
+# everyone, which is the only thing this check is defending.
+FOREIGN_HOSTS="$(
+	printf '%s\n' "$LOCK_INDEX" \
+		| grep -oE '^[[:space:]]*resolved "https?://[^/"]+' \
+		| grep -oE 'https?://[^/"]+' \
+		| grep -vxF -e 'https://registry.npmjs.org' -e 'https://registry.yarnpkg.com' \
+		| sort -u \
+		|| true
+)"
+
+if [ -n "$FOREIGN_HOSTS" ]; then
+	cat >&2 << EOF
+
+pre-commit: BLOCKED — yarn.lock in the index resolves against a non-public registry:
+
+$(printf '%s\n' "$FOREIGN_HOSTS" | sed 's/^/    /')
+
+Every \`resolved\` URL must be public in git — https://registry.npmjs.org/, or
+yarn's own default https://registry.yarnpkg.com — or clones without access to
+the host above cannot install.
+
+A Yarn 4 lockfile records no registry URL, so this one is still in Yarn 1 format.
+Re-resolve it with the pinned Yarn (packageManager in
+package.json) and stage it:
+
+    yarn install
+    git add yarn.lock
+
+A mirror belongs in the per-machine ~/.yarnrc.yml (npmRegistryServer), never in a
+repository, and a Yarn 4 lockfile never records it. If the host above is a mirror,
+this lockfile was not produced by the pinned Yarn 4: re-resolve it against the
+public registry and stage the result.
+
+Bypass once: git commit --no-verify
+EOF
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# The code gates: types, 100% coverage, Qodana. pre-push carries the mutation half.
+#
+# Scoped by path on purpose: a docs-only commit does not build and test a Node
+# server, which is how a hook gets bypassed out of habit.
+# ---------------------------------------------------------------------------
+
+APP='marketplace-services-status'
+
+# Same reasoning as the secret guard above: unguarded, a failed `git diff` is
+# indistinguishable from an empty one, and the empty one is the branch that exits
+# 0 having run no gate at all.
+if ! staged_all="$(git diff --cached --name-only --diff-filter=ACMRD)"; then
+	echo 'pre-commit: `git diff --cached` failed — refusing to commit rather than skip the code gates.' >&2
+	exit 1
+fi
+
+# Everything EXCEPT docs. `systemd/` is in scope — its generator is JS — and so
+# is `semgrep/`, whose rules Qodana never sees but whose vendored ruleset the
+# secret guard skips above.
+# `grep -qv` rather than a PCRE negative lookahead: `grep -P` is a GNU extension
+# and the rest of this file is -E only.
+if ! printf '%s\n' "$staged_all" | grep -v '^$' | grep -qvE '\.md$'; then
+	exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)"
+APP_DIR="$ROOT"
+
+# $1 = what is wrong, $2… = the command(s) that fix it.
+#
+# A missing prerequisite blocks; it never warns and continues. A gate that steps
+# aside when it cannot run is not a gate, it is the hole this hook exists to
+# close, reopened one condition lower.
+gate_block() {
+	local reason="$1"
+	shift
+	{
+		echo
+		echo "pre-commit: BLOCKED — $reason"
+		echo
+		echo 'Fix it with:'
+		echo
+		printf '    %s\n' "$@"
+		echo
+		echo 'Bypass once (pre-push still gates): git commit --no-verify'
+		echo
+	} >&2
+	exit 1
+}
+
+# Yarn 4 does not enforce `engines.node` — yarn classic exited 1 on a mismatch, and nothing
+# else took over — so this check is the enforcement, and this machine's default node may be
+# older than the pin. Read it from the app's package.json rather than from this repo, which
+# has none.
+REQUIRED_NODE="$(node -p "require('$APP_DIR/package.json').engines.node" 2> /dev/null | tr -d '^~>= ')"
+
+if [ -z "$REQUIRED_NODE" ]; then
+	gate_block "node not found in PATH — engines.node could not be read from package.json." \
+		'nvm install --lts && nvm use --lts'
+fi
+
+node_satisfies() {
+	local current
+	current="$(node -v 2> /dev/null | tr -d 'v')"
+	[ -n "$current" ] && [ -n "$REQUIRED_NODE" ] || return 1
+	# caret semantics: same major, and not older than the pin.
+	[ "${current%%.*}" = "${REQUIRED_NODE%%.*}" ] || return 1
+	[ "$(printf '%s\n%s\n' "$REQUIRED_NODE" "$current" | sort -V | head -n 1)" = "$REQUIRED_NODE" ]
+}
+
+if ! node_satisfies; then
+	# nvm.sh trips over unbound variables, so -u comes off around the source.
+	NVM_SH="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+	if [ -s "$NVM_SH" ]; then
+		echo "pre-commit: node $(node -v 2> /dev/null) does not satisfy engines.node — switching via nvm."
+		set +u
+		# shellcheck disable=SC1090
+		. "$NVM_SH" > /dev/null 2>&1 || true
+		nvm use "$REQUIRED_NODE" > /dev/null 2>&1 || true
+		set -u
+	fi
+fi
+
+if ! node_satisfies; then
+	gate_block "node $(node -v 2> /dev/null || echo '(not found)') does not satisfy engines.node ^$REQUIRED_NODE — the gates below would run on the wrong runtime." \
+		"nvm install $REQUIRED_NODE && nvm use $REQUIRED_NODE"
+fi
+
+if ! command -v yarn > /dev/null 2>&1; then
+	gate_block 'yarn not found in PATH — cannot run the type or coverage gates.' \
+		'npm install -g corepack@0.36.0 && corepack enable'
+fi
+
+cd "$APP_DIR" || gate_block "cannot enter $APP_DIR." "git checkout ."
+
+# No lint gate, and that is not an oversight: this package has no
+# eslint.config.js and no .prettierrc.
+#
+# The type check IS separate, since 2026-09-20. `test:cov` is
+# `yarn build && vitest run --coverage`, and `yarn build` reads `tsconfig.json`,
+# whose `rootDir` is `./src` — so tsc ran first but never read a line of `test/`,
+# and vitest strips types rather than checking them. Seven type errors lived in
+# that gap. `yarn typecheck` is `tsconfig.test.json`: the same options over src/,
+# test/, systemd/generate.mjs and the vitest configs, with no emit.
+echo "pre-commit: $APP — type-checking (yarn typecheck)…"
+
+if ! yarn typecheck; then
+	cat >&2 << 'EOF'
+
+pre-commit: BLOCKED — marketplace-services-status does not type-check.
+
+`yarn typecheck` is `tsc -p tsconfig.test.json`: src/, test/, systemd/generate.mjs
+and the vitest configs, with no emit. `yarn build` sees src/ only, so this is the
+only gate that reads the tests as TypeScript.
+
+Fix the errors above. Do NOT relax tsconfig.json, and do not narrow the include
+in tsconfig.test.json.
+
+Bypass once (pre-push still gates): git commit --no-verify
+EOF
+	exit 1
+fi
+
+echo "pre-commit: $APP — types clean."
+
+echo "pre-commit: $APP — building, testing and holding 100% coverage (yarn test:cov)…"
+
+if ! yarn test:cov; then
+	cat >&2 << 'EOF'
+
+pre-commit: BLOCKED — marketplace-services-status failed to build, failed its tests, or fell
+below 100% coverage.
+
+`test:cov` is `yarn build && vitest run --coverage`, so read the first error
+above rather than the last: a tsc failure stops the run before any test executes.
+
+vitest.config.mts gates every metric at 100. Nothing here needs live
+infrastructure — systemctl and every probe target are stubbed — so a red run is a
+real gap, never a missing service. The one suite that does reach out,
+test/security.live.test.ts, boots the server on a loopback port and talks to
+itself. Add the missing test; never lower the threshold.
+
+Full report: coverage/index.html
+
+Bypass once (pre-push still gates): git commit --no-verify
+EOF
+	exit 1
+fi
+
+echo "pre-commit: $APP — 100% coverage held."
+
+if [ -n "${SKIP_QODANA:-}" ]; then
+	echo 'pre-commit: Qodana gate skipped — SKIP_QODANA is set.' >&2
+	exit 0
+fi
+
+if ! command -v qodana > /dev/null 2>&1; then
+	gate_block 'the qodana CLI is not in PATH.' \
+		'# install it, then re-run the commit:' \
+		'https://github.com/JetBrains/qodana-cli#installation'
+fi
+
+if ! command -v docker > /dev/null 2>&1; then
+	gate_block 'docker not found in PATH — the CLI runs the linter in a container.' \
+		'# install Docker Engine, then re-run the commit:' \
+		'https://docs.docker.com/engine/install/'
+fi
+
+if ! docker info > /dev/null 2>&1; then
+	gate_block 'docker daemon not reachable.' \
+		'sudo systemctl start docker'
+fi
+
+for required in qodana.yaml qodana.sh; do
+	if [ ! -f "$APP_DIR/$required" ]; then
+		gate_block "$required missing." \
+			"git checkout $required"
+	fi
+done
+
+# Checked separately from existence, because the failure it catches is indistinguishable
+# from a real finding once it happens: a non-executable qodana.sh makes the invocation
+# below exit non-zero having produced no results directory at all, and the block below
+# reports that as "Qodana failed on marketplace-services-status" with a link to a report that was
+# never written. This app's copy was committed at mode 100644 while all eleven other
+# repos' are 100755 — the mode is tracked by git, so it is restored on every clone.
+if [ ! -x "$APP_DIR/qodana.sh" ]; then
+	gate_block "qodana.sh is not executable — the scan would fail as a permission error and be reported as a finding." \
+		"chmod +x qodana.sh" \
+		"git update-index --chmod=+x qodana.sh"
+fi
+
+# Track the image declared in qodana.yaml rather than hard-coding a tag here, so
+# bumping the version in one place cannot leave the hook scanning with an older
+# linter than the manual runs use.
+LINTER="$(grep -oE 'jetbrains/qodana-js:[0-9][0-9.]*' "$APP_DIR/qodana.yaml" | head -n 1 || true)"
+
+if [ -z "$LINTER" ]; then
+	gate_block "no 'jetbrains/qodana-js:<version>' image line found in qodana.yaml." \
+		'# restore the `image:` key, then re-run the commit:' \
+		"git checkout qodana.yaml"
+fi
+
+# The CLI would pull this itself. Blocking instead keeps a slow or unreachable
+# Docker Hub from turning into a failed commit: one explicit pull per image bump,
+# versus a network flake on any commit.
+if ! docker image inspect "$LINTER" > /dev/null 2>&1; then
+	gate_block "linter image $LINTER not present locally." \
+		"docker pull $LINTER"
+fi
+
+# Metadata check only — no value is ever read here. qodana.sh loads the token into
+# the process env without printing it, and accepts one that is already exported,
+# which is why an exported token satisfies this check with no .env present.
+if [ -z "${QODANA_TOKEN:-}" ] && { [ ! -f "$APP_DIR/.env" ] || ! grep -q '^[[:space:]]*QODANA_TOKEN=' "$APP_DIR/.env"; }; then
+	gate_block "no QODANA_TOKEN, in the environment or in .env — Qodana 2023.2+ refuses to start without one." \
+		'# create this app'"'"'s own project on https://qodana.cloud (never reuse another' \
+		'# repo'"'"'s token — reports would land in that project and corrupt its baseline), then:' \
+		"echo 'QODANA_TOKEN=<token>' >> .env"
+fi
+
+echo "pre-commit: $APP — running Qodana ($LINTER)…"
+
+# SKIP_TESTS=1 reuses the coverage/lcov.info just written above instead of
+# re-running the suite inside qodana.sh, which does it as `yarn test:cov || true`
+# with the exit code swallowed.
+if ! SKIP_TESTS=1 "$APP_DIR/qodana.sh" --results-dir "$APP_DIR/.qodana/results"; then
+	cat >&2 << 'EOF'
+
+pre-commit: BLOCKED — Qodana failed on marketplace-services-status.
+
+The gate lives in qodana.yaml: severityThresholds critical 0 /
+high 0, plus testCoverageThresholds 100 total / 100 fresh. Findings are listed
+above, with a report link on qodana.cloud.
+
+Local SARIF: .qodana/results/qodana.sarif.json
+
+This exit code also covers infrastructure failures (daemon died mid-scan, out of
+disk). If the report shows no findings, it was not a finding.
+
+Bypass once (coverage and pre-push still gate): SKIP_QODANA=1 git commit
+EOF
+	exit 1
+fi
+
+echo "pre-commit: $APP — Qodana clean. Proceeding with commit."
+exit 0
