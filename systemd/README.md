@@ -50,7 +50,7 @@ the failure and spam the journal instead. `marketplace-status.service` is the op
 The shared half of the configuration is exported into a terminal by direnv (ADR-053) and reaches nothing else. A unit started from this page or from
 `marketplace.target` therefore boots without it, and a backend exits at once with `Missing required environment variable: …` while `tsx watch` keeps the unit
 `active (running)`. The nine backends need a per-machine drop-in that names the shared file; the three frontends do not. The recipe, with its caveats, is in
-[`../../SETUP.md`](../../SETUP.md) §7c. `install.sh` and `uninstall.sh` never create, change or remove a `*.service.d` directory.
+[`../../SETUP.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/SETUP.md) §7c. `install.sh` and `uninstall.sh` never create, change or remove a `*.service.d` directory.
 
 ## Why `ExecStart` isn't `yarn dev`
 

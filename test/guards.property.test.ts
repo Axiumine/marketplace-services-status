@@ -27,8 +27,7 @@ import { hostname, ipv6, lowercase, port, RUN } from './support/arbitraries';
 // "is there any input at all for which this line answers wrong".
 //
 // ⚠️ The `fast-check` import above is also what OpenSSF Scorecard's Fuzzing check looks for (ADR-054): a
-// static `import … from 'fast-check'` in a `.ts` file of the parent repository's own tree. Keep it static,
-// and keep these suites here — a sub-repo's files are not in the tarball Scorecard reads.
+// static `import … from 'fast-check'` in a `.ts` file of this repository's own tree. Keep it static.
 // ---------------------------------------------------------------------------
 
 const LOOPBACK = ['127.0.0.1', 'localhost', '::1'];

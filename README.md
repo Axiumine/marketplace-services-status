@@ -6,9 +6,9 @@
 > platform are deliberately unbuilt, and anything here — schemas, endpoints, configuration, file
 > layout — can still change without notice. Whatever automated gates this repo runs, treat the result
 > as unproven: do not point it at real users or real data.
-> Read [`docs/PRODUCTION_HARDENING.md`](../docs/PRODUCTION_HARDENING.md) before taking any of it further.
+> Read [`docs/PRODUCTION_HARDENING.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/PRODUCTION_HARDENING.md) before taking any of it further.
 
-Realtime monitor and control panel for the [Marketplace platform](../CLAUDE.md)'s dev processes: 9
+Realtime monitor and control panel for the [Marketplace platform](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/CLAUDE.md)'s dev processes: 9
 Koa/Apollo backend services plus 3 Vite frontends, each wrapped in its own **systemd user unit**. The
 page shows live health, uptime, memory and restart counts for all 12, streams their journal logs, and
 can start / stop / restart any one service, a whole tier, or the whole platform — without a shell open.
@@ -34,7 +34,7 @@ the systemd unit generator both read it, and neither hand-encodes the list of se
 | `marketplace-user` | Customer app (SSR) | Frontends | frontend | 3045 | `/` |
 
 `marketplace-dev-public-resource` also exposes `GET /check/` as a health path — it is the one service
-with real REST endpoints alongside its GraphQL API (see the workspace [`docs/architecture.md`](../docs/architecture.md), *Services*).
+with real REST endpoints alongside its GraphQL API (see the workspace [`docs/architecture.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/architecture.md), *Services*).
 The three frontends bind `127.0.0.1`; the nine backends bind the wildcard address but are still reached
 at `127.0.0.1` from this monitor, which only ever runs on the same host.
 
@@ -232,7 +232,7 @@ service list from `services.json` at runtime/generation time.
 GPL-3.0-or-later — see [LICENSE](./LICENSE), the unmodified text of the GNU General Public License,
 version 3. The copyright notice is below rather than in that file: GitHub's licence detector needs `LICENSE`
 to match the FSF's text closely, and a long header on it would drop the match below the detector's threshold
-([ADR-056](../docs/devprotocol/phase3/adr/ADR-056-the-license-file-is-the-pristine-gpl-text.md)).
+([ADR-056](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/devprotocol/phase3/adr/ADR-056-the-license-file-is-the-pristine-gpl-text.md)).
 
 marketplace services status dashboard for <https://github.com/Axiumine/fullstack-marketplace-blueprint>
 

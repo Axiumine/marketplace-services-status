@@ -2,11 +2,10 @@
 
 The local control panel for the platform's systemd **user** units: a Koa + `ws` server on port 2901
 that runs one batched `systemctl show` per tick, TCP-probes each configured port, and streams the
-snapshot to a browser page that can start, stop and restart units and tail their journal. Not a repo of
-its own — a tracked directory of the parent workspace, gated by the parent's hooks (ADR-025), so a
-change here commits under the parent's rules.
+snapshot to a browser page that can start, stop and restart units and tail their journal. A repo of its
+own, tracked by the parent workspace as a submodule (ADR-060, ADR-031), gated by its own `.githooks/`.
 
-**Read parent first** — [`../CLAUDE.md`](../CLAUDE.md)
+**Read parent first** — [`../CLAUDE.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/CLAUDE.md)
 
 | Need | File |
 |---|---|
@@ -14,8 +13,8 @@ change here commits under the parent's rules.
 | why the gates are shaped this way, the property suites (fast-check), and the line-level invariants mutation testing protects | [`REPO.md`](./REPO.md) |
 | the generated units, why nothing except the monitor is enabled, why `ExecStart` is not `yarn dev` | [`systemd/README.md`](./systemd/README.md) |
 | the three custom rules, what is vendored and why | [`semgrep/README.md`](./semgrep/README.md) |
-| why it has no git repo of its own and how the parent gates it | [`../docs/devprotocol/phase3/adr/ADR-025-services-status-gated-by-parent-hooks.md`](../docs/devprotocol/phase3/adr/ADR-025-services-status-gated-by-parent-hooks.md) |
-| where this sits among the frontends and their gates | [`../docs/frontends.md`](../docs/frontends.md) |
+| why it is a repo of its own | [`../docs/devprotocol/phase3/adr/ADR-060-services-status-is-a-sub-repo.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/devprotocol/phase3/adr/ADR-060-services-status-is-a-sub-repo.md) |
+| where this sits among the frontends and their gates | [`../docs/frontends.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/frontends.md) |
 
 `services.json` is the only source of truth: 6 groups over the 9 backend services and the 3 frontend
 dev servers. Adding a service is an entry there plus a re-run of `yarn systemd:install` — no code change
@@ -32,7 +31,7 @@ every pull request — two callers, both automated, and a hand is neither.
 
 ## Hard rules and traps
 
-- **Indentation is two spaces throughout, like the rest of the workspace (ADR-058).** The package has no eslint or prettier (ADR-025), so nothing enforces it; a file you add here follows it by hand.
+- **Indentation is two spaces throughout, like the rest of the workspace (ADR-058).** The package has no eslint or prettier (ADR-060), so nothing enforces it; a file you add here follows it by hand.
 - ⚠️ **A service `id` *is* its systemd unit name.** `${id}.service` is synthesised in `config.ts`; no
   `unit` field is ever read from `services.json`. Renaming an `id` silently retargets which real unit
   `start`/`stop`/`restart` acts on.
@@ -69,10 +68,11 @@ one of those lines "for clarity" is how the mutation gate goes red.
 
 - **100% statements, branches, functions and lines; mutation `break: 100`. Never lower either** — a
   change that needs a threshold lowered needs a test instead, never a smaller number.
-- **The parent workspace's hooks gate this directory**, not a hook of its own — `pre-commit` runs
-  `yarn typecheck` + `yarn test:cov` + Qodana on staged paths here, `pre-push` runs the full unscoped
-  chain including mutation. Why the split, and what `coverage-audit.mjs` proves beyond vitest: [`REPO.md`](./REPO.md).
+- **This repo's own hooks gate it** — `pre-commit` runs the secret guard, then `yarn typecheck` +
+  `yarn test:cov` + Qodana when a non-markdown path is staged; `pre-push` runs the full unscoped chain
+  including mutation. Why the split, and what `coverage-audit.mjs` proves beyond vitest: [`REPO.md`](./REPO.md).
 - **Semgrep is a push-only gate.** Bypass for a Docker outage, never for a finding:
   `SKIP_SEMGREP=1 git push`.
-- Commits here land in the parent repo. **Never commit on `main`** — branch first with
+- A change here is one commit in this repo plus one in the parent bumping the submodule pointer
+  (ADR-031). **Never commit on `main`** — branch first with
   `git switch -c <type>/<slug>`; merging into `main` is the user's decision alone.
