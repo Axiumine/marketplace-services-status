@@ -38,7 +38,9 @@ permissions:
 jobs:
   gates:
     name: gates
-    runs-on: ubuntu-latest
+    # The organisation's own self-hosted runners, any of them (owner, 2026-11-28, ADR-061).
+    # Never a GitHub-hosted label.
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
     steps:
       - name: Checkout code
@@ -50,6 +52,17 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
+
+      # The runners are persistent: what a job leaves in the runner user's home, the next job
+      # reads. Corepack, yarn and npm keep their state under RUNNER_TEMP, which the runner
+      # empties for every job, so the no-cache rule below still holds.
+      - name: Keep tool state inside the job
+        run: |
+          {
+            echo "COREPACK_HOME=$RUNNER_TEMP/corepack"
+            echo "YARN_GLOBAL_FOLDER=$RUNNER_TEMP/yarn"
+            echo "npm_config_cache=$RUNNER_TEMP/npm"
+          } >> "$GITHUB_ENV"
 
       # ⚠️ No `cache: yarn`, deliberately. This workflow runs on pull requests from
       # anywhere, and a dependency cache is state one pull request writes and the next
@@ -94,7 +107,7 @@ jobs:
 
       # The hook's trivy invocation, flag for flag. --skip-dirs .stryker-tmp is
       # load-bearing there and harmless here; the named db cache volume is not
-      # reproduced because a runner is thrown away after every job.
+      # reproduced: state shared between jobs is the one input a pull request could choose.
       - name: Gate 2 - dependency advisories (trivy)
         run: |
           docker run --rm \
